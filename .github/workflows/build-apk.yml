@@ -1,0 +1,88 @@
+name: Build Murshid APK
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Android APK
+    runs-on: ubuntu-22.04
+    timeout-minutes: 120
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            git zip unzip autoconf automake libtool libltdl-dev pkg-config \
+            zlib1g-dev libncurses5-dev libncursesw5-dev libtinfo6 \
+            cmake libffi-dev libssl-dev build-essential ccache
+
+      - name: Install Buildozer
+        run: |
+          python -m pip install --upgrade pip wheel
+          pip install buildozer "cython==0.29.36"
+
+      - name: Pin python-for-android (self-heal buildozer.spec)
+        run: |
+          python - <<'PY'
+          import re
+          p = 'buildozer.spec'
+          s = open(p, encoding='utf-8').read().replace('\r\n', '\n')
+          s = re.sub(r'(?m)^p4a\.branch\s*=.*\n', '', s)      # شيل أي سطر قديم (حتى لو في قسم غلط)
+          s = s.replace('[app]\n', '[app]\np4a.branch = v2024.01.21\n', 1)
+          s = re.sub(r'(?m)^requirements\s*=.*$',
+                     'requirements = python3==3.11.5,hostpython3==3.11.5,kivy==2.3.0,arabic-reshaper==3.0.0,python-bidi==0.4.2,six,setuptools,pyjnius,android', s, count=1)
+          open(p, 'w', encoding='utf-8').write(s)
+          PY
+          grep -nE "^\[|^p4a\.branch|^requirements" buildozer.spec
+
+      - name: Verify project files
+        run: |
+          for f in buildozer.spec main.py engine.py ui.py tabs_a.py tabs_b.py fonts/DejaVuSans.ttf fonts/DejaVuSans-Bold.ttf; do
+            test -f "$f" || { echo "ERROR: missing $f"; exit 1; }
+          done
+          # حماية: لازم النسخة مثبّتة، وإلا buildozer هيسحب أحدث python-for-android (Python 3.14) ويفشل
+          grep -q "^p4a.branch *= *v2024.01.21" buildozer.spec || { echo "ERROR: p4a.branch not pinned in buildozer.spec"; exit 1; }
+          grep -q "python3==3.11" buildozer.spec || { echo "ERROR: python3 version not pinned in buildozer.spec"; exit 1; }
+          echo "All project files found"
+
+      - name: Cache Buildozer downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.buildozer
+            .buildozer
+          key: buildozer-${{ runner.os }}-${{ hashFiles('buildozer.spec') }}
+          restore-keys: |
+            buildozer-${{ runner.os }}-
+
+      - name: Build Android APK
+        run: buildozer -v android debug
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: Murshid-APK
+          path: bin/*.apk
+          if-no-files-found: error
+          retention-days: 7
